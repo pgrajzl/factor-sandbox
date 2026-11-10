@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from . import factors
+from plotly.subplots import make_subplots
 
 PERIODS = {
     "5y": pd.DateOffset(years=5),
@@ -20,8 +21,10 @@ def _slice(s, period):
 
 
 def _window(prices, market_px, ticker, period):
-    stock = _slice(prices[ticker], period)
-    return stock, _slice(market_px, period).reindex(stock.index)
+    """Align stock and benchmark on common dates, then slice the window."""
+    df = pd.concat([prices[ticker], market_px], axis=1, join="inner").dropna()
+    df = df[df.index >= df.index.max() - PERIODS[period]]
+    return df.iloc[:, 0], df.iloc[:, 1]
 
 
 def _rebase(s):
@@ -34,7 +37,7 @@ def _line(s, name, color="black", width=1.6, dash=None):
 
 
 def _period_figure(make_traces, title, ylabel, default="1y", hline=None,
-                   caption=None, subtitle=None, xlabel=None, hovermode="x unified"):
+                   caption=None, subtitle=None, xlabel=None, hovermode="x unified", fig=None):
     """make_traces(p) -> list of traces; subtitle(p) -> str. One figure with a period dropdown."""
     periods = list(PERIODS)
 
@@ -44,7 +47,7 @@ def _period_figure(make_traces, title, ylabel, default="1y", hline=None,
             t += f"<br><span style='font-size:12px;color:gray'>{subtitle(p)}</span>"
         return t
 
-    fig, n = go.Figure(), None
+    fig, n = (fig if fig is not None else go.Figure()), None
     for p in periods:
         traces = make_traces(p)
         n = len(traces)
@@ -147,4 +150,136 @@ def plot_regression(prices, market_px, ticker, default="1y", market_name="SPY"):
     fig.update_layout(margin_b=110)
     fig.update_xaxes(**GRID, zeroline=True, zerolinecolor="gray", zerolinewidth=0.8)
     fig.update_yaxes(zeroline=True, zerolinecolor="gray", zerolinewidth=0.8)
+    return fig
+
+def plot_two_factor(prices, market_px, sector_px, ticker, default="1y",
+                    market_name="SPY", sector_name="XLK"):
+    """AAPL-style two-factor fit: market, then sector orthogonalized to market."""
+    base = pd.concat([prices[ticker], market_px, sector_px], axis=1, join="inner").dropna()
+    base.columns = ["s", "m", "x"]
+
+    fits = {}
+    for p in PERIODS:
+        w = base[base.index >= base.index.max() - PERIODS[p]]
+        r = w.pct_change().dropna() * 100
+        F = factors.sequential_orthogonalize(r[["m", "x"]])
+        fits[p] = dict(r=r, u=F["x"],
+                       f1=factors.ols(r["s"], F[["m"]]),
+                       f2=factors.ols(r["s"], F))
+
+    pts = dict(color="gray", size=5, opacity=0.45)
+    fit_line = dict(color="black", width=1.8)
+
+    def traces(p):
+        d = fits[p]
+        r, u, f1, f2 = d["r"], d["u"], d["f1"], d["f2"]
+        bm, bs = f2["betas"]["m"], f2["betas"]["x"]
+        dates = r.index.strftime("%Y-%m-%d")
+        xm = np.linspace(r["m"].min(), r["m"].max(), 50)
+        xu = np.linspace(u.min(), u.max(), 50)
+        hover = "%{text}<br>x: %{x:.2f}%<br>y: %{y:.2f}%<extra></extra>"
+        return [
+            go.Scatter(x=r["m"], y=r["s"], mode="markers", marker=pts,
+                       text=dates, hovertemplate=hover, showlegend=False),
+            go.Scatter(x=xm, y=f1["alpha"] + bm * xm, mode="lines", line=fit_line,
+                       hoverinfo="skip", showlegend=False),
+            go.Scatter(x=u, y=f1["resid"], mode="markers", marker=pts,
+                       text=dates, hovertemplate=hover, showlegend=False,
+                       xaxis="x2", yaxis="y2"),
+            go.Scatter(x=xu, y=bs * xu, mode="lines", line=fit_line,
+                       hoverinfo="skip", showlegend=False, xaxis="x2", yaxis="y2"),
+        ]
+
+    def subtitle(p):
+        f1, f2 = fits[p]["f1"], fits[p]["f2"]
+        bm, bs = f2["betas"]["m"], f2["betas"]["x"]
+        return (f"r<sub>{ticker}</sub> = {f2['alpha']:.3f}% + {bm:.2f} r<sub>{market_name}</sub>"
+                f" + {bs:.2f} u<sub>{sector_name}</sub>   |   "
+                f"R²: {f1['r2']:.2f} → {f2['r2']:.2f}  (ΔR² = {f2['r2'] - f1['r2']:+.2f})"
+                f"   n = {f2['n']}")
+
+    fig = make_subplots(
+        rows=1, cols=2, horizontal_spacing=0.1,
+        subplot_titles=(f"{ticker} vs {market_name}",
+                        f"{ticker} market residual vs {sector_name} ⊥ {market_name}"),
+    )
+    fig = _period_figure(traces, title=f"{ticker} on {market_name} + {sector_name} (orthogonalized)",
+                         ylabel=None, default=default, subtitle=subtitle,
+                         hovermode="closest", fig=fig)
+
+    fig.update_layout(width=1150, height=540, margin=dict(t=130, b=110))
+    fig.update_annotations(font=dict(family="Times New Roman", size=13))
+    fig.update_xaxes(title_text=f"{market_name} return (%)", row=1, col=1)
+    fig.update_yaxes(title_text=f"{ticker} return (%)", row=1, col=1)
+    fig.update_xaxes(title_text=f"{sector_name} residual u (%)", row=1, col=2)
+    fig.update_yaxes(title_text=f"{ticker} market residual (%)", row=1, col=2)
+    fig.update_xaxes(**GRID, zeroline=True, zerolinecolor="gray", zerolinewidth=0.8)
+    fig.update_yaxes(zeroline=True, zerolinecolor="gray", zerolinewidth=0.8)
+
+    fig.add_annotation(
+        text="Left: market fit (slope β_m). Right: AAPL's market residual vs the part of XLK "
+             "unexplained by SPY (slope β_s). Factors orthogonalized within each window.",
+        xref="paper", yref="paper", x=0.5, y=-0.22, xanchor="center", yanchor="top",
+        showarrow=False, font=dict(family="Times New Roman", size=11, color="gray"),
+    )
+    return fig
+
+def plot_actual_vs_fitted(prices, factor_px, ticker, default="1y"):
+    """Actual vs fitted daily returns for a multi-factor model.
+    factor_px: dict {name: price series}, in orthogonalization order."""
+    names = list(factor_px)
+    base = pd.concat([prices[ticker], *factor_px.values()], axis=1, join="inner").dropna()
+    base.columns = ["s", *names]
+
+    fits = {}
+    for p in PERIODS:
+        w = base[base.index >= base.index.max() - PERIODS[p]]
+        r = w.pct_change().dropna() * 100
+        f = factors.ols(r["s"], factors.sequential_orthogonalize(r[names]))
+        f["actual"], f["fitted"] = r["s"], r["s"] - f["resid"]
+        fits[p] = f
+
+    def traces(p):
+        f = fits[p]
+        lo = min(f["actual"].min(), f["fitted"].min())
+        hi = max(f["actual"].max(), f["fitted"].max())
+        return [
+            go.Scatter(x=f["fitted"], y=f["actual"], mode="markers", name="Daily returns",
+                       marker=dict(color="gray", size=5, opacity=0.45),
+                       text=f["actual"].index.strftime("%Y-%m-%d"),
+                       hovertemplate="%{text}<br>Fitted: %{x:.2f}%<br>Actual: %{y:.2f}%<extra></extra>"),
+            go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="45° line (perfect fit)",
+                       line=dict(color="black", width=1.6, dash="dash"), hoverinfo="skip"),
+        ]
+
+    def subtitle(p):
+        f = fits[p]
+        terms = " + ".join(
+            f"{b:.2f} {'r' if i == 0 else 'u'}<sub>{name}</sub>"
+            for i, (name, b) in enumerate(f["betas"].items())
+        )
+        idio_vol = f["resid"].std() * np.sqrt(252)
+        return (f"r<sub>{ticker}</sub> = {f['alpha']:.3f}% + {terms}   |   "
+                f"R² = {f['r2']:.2f}   idio vol = {idio_vol:.1f}% ann.   n = {f['n']}")
+
+    fig = _period_figure(
+        traces, title=f"{ticker}: actual vs fitted ({' + '.join(names)})",
+        xlabel="Fitted daily return (%)", ylabel="Actual daily return (%)",
+        default=default, subtitle=subtitle, hovermode="closest",
+    )
+    fig.update_layout(
+        width=720, height=660, margin=dict(t=100, b=110),
+        title=dict(y=0.97, yanchor="top"),
+        legend=dict(orientation="v", x=0.02, xanchor="left", y=0.98, yanchor="top",
+                    bgcolor="rgba(255,255,255,0.8)"),
+    )
+    fig.update_xaxes(**GRID, zeroline=True, zerolinecolor="gray", zerolinewidth=0.8)
+    fig.update_yaxes(zeroline=True, zerolinecolor="gray", zerolinewidth=0.8,
+                     scaleanchor="x", scaleratio=1)
+    fig.add_annotation(
+        text="Fitted = α + Σ β·factor. Points on the dashed line are fully explained; "
+             "vertical distance to it is the idiosyncratic return ε.",
+        xref="paper", yref="paper", x=0.5, y=-0.17, xanchor="center", yanchor="top",
+        showarrow=False, font=dict(family="Times New Roman", size=11, color="gray"),
+    )
     return fig
