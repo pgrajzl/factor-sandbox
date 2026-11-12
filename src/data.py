@@ -70,3 +70,17 @@ def get_market(ticker="SPY", years=5, save=True):
 def load_market(ticker="SPY"):
     path = data_dir / "returns" / f"{ticker.lower()}_returns.parquet"
     return pd.read_parquet(path).squeeze()
+
+def get_volume(tickers, years=5, save=True):
+    """Download daily share volume."""
+    start = pd.Timestamp.today() - pd.DateOffset(years=years)
+    vol = yf.download(tickers, start=start, auto_adjust=True, progress=True)["Volume"]
+    vol = vol.dropna(axis=1, how="all")
+
+    if save:
+        vol.to_parquet(data_dir / "prices" / "volume.parquet")
+    return vol
+
+
+def load_volume():
+    return pd.read_parquet(data_dir / "prices" / "volume.parquet")

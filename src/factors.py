@@ -75,29 +75,37 @@ def volatility(returns, window=63):
     """Trailing annualized realized vol of daily returns."""
     return returns.rolling(window, min_periods=int(0.8 * window)).std() * np.sqrt(252)
 
-def cs_regression_multi(returns, exposures, min_obs=50):
-    """Daily cross-sectional OLS with several exposures:
-    r_it = a_t + sum_k f_kt * z_ik,t-1 + e_it.   exposures: dict {name: panel}."""
+def cs_regression_multi(returns, exposures, min_obs=50, intercept=True, return_resid=False):
+    """Daily cross-sectional OLS: r_it = [a_t] + sum_k f_kt * x_ik,t-1 + e_it.
+    exposures: dict {name: panel}. Set intercept=False when sector dummies are included.
+    return_resid=True also returns the (days x stocks) residual panel."""
     names = list(exposures)
     R = returns.values
     X = np.stack([exposures[k].shift(1).reindex(index=returns.index, columns=returns.columns).values
                   for k in names], axis=-1)                       # (days, stocks, factors)
+    E = np.full_like(R, np.nan)
 
+    lead = ["intercept"] if intercept else []
     rows = []
     for t in range(len(R)):
         y, x = R[t], X[t]
         ok = ~np.isnan(y) & ~np.isnan(x).any(axis=1)
         n = ok.sum()
         if n < min_obs:
-            rows.append([np.nan] * (len(names) + 3))
+            rows.append([np.nan] * (len(lead) + len(names) + 2))
             continue
-        A = np.column_stack([np.ones(n), x[ok]])
+        A = np.column_stack([np.ones(n), x[ok]]) if intercept else x[ok]
         coef, *_ = np.linalg.lstsq(A, y[ok], rcond=None)
         e = y[ok] - A @ coef
-        rows.append([coef[0], *coef[1:], 1 - e.var() / y[ok].var(), n])
+        E[t, ok] = e
+        rows.append([*coef, 1 - e.var() / y[ok].var(), n])
 
-    out = pd.DataFrame(rows, index=returns.index, columns=["intercept", *names, "r2", "n"])
-    return out.dropna(subset=["r2"])
+    out = pd.DataFrame(rows, index=returns.index, columns=[*lead, *names, "r2", "n"])
+    keep = out["r2"].notna()
+    out = out[keep]
+    if return_resid:
+        return out, pd.DataFrame(E, index=returns.index, columns=returns.columns)[keep]
+    return out
 
 def reversal(prices, window=21):
     """Short-term reversal: negative of the trailing 1-month return (long losers, short winners)."""
@@ -124,3 +132,45 @@ def factor_stats(fr):
         "Max drawdown (%)": (fr.cumsum() - fr.cumsum().cummax()).min(),
         "Days": len(fr),
     })
+
+def dollar_volume(prices, volume, window=63):
+    """Log of average daily dollar volume over the trailing window."""
+    dv = (prices * volume.reindex_like(prices)).replace(0, np.nan)
+    return np.log(dv.rolling(window, min_periods=int(0.8 * window)).mean())
+
+def sector_exposures(universe, index, columns):
+    """One 0/1 dummy panel per GICS sector, aligned to the returns panel."""
+    sec = universe.set_index("ticker")["sector"].reindex(columns)
+    return {
+        s: pd.DataFrame(np.tile((sec == s).astype(float).values, (len(index), 1)),
+                        index=index, columns=columns)
+        for s in sorted(sec.dropna().unique())
+    }
+
+def attribute(ticker, returns, exposures, res, resid, groups=None):
+    """Daily return attribution for one stock: lagged exposure x factor return per factor,
+    plus residual. groups: {new_name: [factor columns]} to collapse, e.g. all sectors -> 'Sector'."""
+    idx = res.index
+    X = pd.DataFrame({k: v[ticker].shift(1).reindex(idx) for k, v in exposures.items()})
+    contrib = X * res[X.columns]
+
+    for name, cols in (groups or {}).items():
+        contrib[name] = contrib[cols].sum(axis=1)
+        contrib = contrib.drop(columns=cols)
+
+    contrib["Idio"] = resid[ticker].reindex(idx)
+    contrib["Total"] = returns[ticker].reindex(idx)
+    return contrib
+
+def risk_decomp(contrib, total="Total"):
+    """Ex-post risk decomposition of a return into its additive components.
+    Share_j = Cov(c_j, r) / Var(r); shares sum to 100%."""
+    c = contrib.dropna()
+    r, comps = c[total], c.drop(columns=total)
+    out = pd.DataFrame({
+        "Ann. vol (%)": comps.std() * np.sqrt(252) * 100,
+        "Corr with total": comps.corrwith(r),
+        "Share of variance (%)": comps.apply(lambda s: s.cov(r)) / r.var() * 100,
+    })
+    out.loc[total] = [r.std() * np.sqrt(252) * 100, 1.0, 100.0]
+    return out

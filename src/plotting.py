@@ -408,3 +408,44 @@ def plot_table(data, title=None, subtitle=None, caption=None, fmt="{:.2f}",
                            xanchor="center", yanchor="top", showarrow=False,
                            font=dict(family="Times New Roman", size=11, color="gray"))
     return fig
+
+def plot_attribution(contrib, ticker, default="1y"):
+    """Cumulative return attribution: each factor's running contribution, idio, and total."""
+    df = contrib.dropna() * 100
+    colors = {"Total": "black", "Idio": "gray", "Sector": "#4a6fa5",
+              "Momentum": "#b5651d", "Beta": "#6b8e23", "Volatility": "#8b3a62",
+              "Reversal": "#c9a227", "Dollar volume": "#5f9ea0"}
+    extra = ["#7a7a7a", "#a0522d", "#2f4f4f", "#9370db"]
+    factor_cols = [c for c in df.columns if c not in ("Total", "Idio")]
+    cols = ["Total", *factor_cols, "Idio"]
+
+    def window(p):
+        return df[df.index >= df.index.max() - PERIODS[p]]
+
+    def style(i, c):
+        if c == "Total":
+            return dict(color="black", width=2.4)
+        if c == "Idio":
+            return dict(color="gray", width=1.6, dash="dash")
+        return dict(color=colors.get(c, extra[i % len(extra)]), width=1.4)
+
+    def traces(p):
+        w = window(p).cumsum()
+        return [_line(w[c], c, **style(i, c)) for i, c in enumerate(cols)]
+
+    def subtitle(p):
+        w = window(p).sum()
+        return (f"Total {w['Total']:.1f}%  =  factors {w[factor_cols].sum():.1f}%"
+                f"  +  idio {w['Idio']:.1f}%")
+
+    fig = _period_figure(
+        traces, title=f"{ticker}: return attribution", ylabel="Cumulative contribution (%)",
+        default=default, hline=0, subtitle=subtitle,
+        caption="Running sum of daily contributions (lagged exposure × factor return). "
+                "Factor lines plus Idio add up to Total.",
+    )
+    fig.update_layout(
+        width=1050, margin_r=170,
+        legend=dict(orientation="v", x=1.02, xanchor="left", y=1, yanchor="top"),
+    )
+    return fig
