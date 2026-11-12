@@ -283,3 +283,71 @@ def plot_actual_vs_fitted(prices, factor_px, ticker, default="1y"):
         showarrow=False, font=dict(family="Times New Roman", size=11, color="gray"),
     )
     return fig
+
+def plot_factor_returns(fr, name="Momentum (12-1)", default="5y"):
+    """Cumulative factor return over the selected window, with window stats in the subtitle."""
+    s = fr * 100
+
+    def subtitle(p):
+        w = _slice(s, p)
+        ann, vol = w.mean() * 252, w.std() * np.sqrt(252)
+        return f"Ann. return {ann:.1f}%   vol {vol:.1f}%   Sharpe {ann / vol:.2f}   days = {len(w)}"
+
+    return _period_figure(
+        lambda p: [_line(_slice(s, p).cumsum(), name)],
+        title=f"{name} factor: cumulative return", ylabel="Cumulative return (%)",
+        default=default, hline=0, subtitle=subtitle,
+        caption="Daily return per 1σ of momentum exposure from the cross-sectional regression, "
+                "summed from the start of the window.",
+    )
+
+
+def plot_cs_r2(r2, name="Momentum (12-1)", default="1y", window=21):
+    """Daily cross-sectional R² with a rolling mean."""
+    s = r2 * 100
+    roll = s.rolling(window).mean()
+
+    return _period_figure(
+        lambda p: [_line(_slice(s, p), "Daily R²", color="lightgray", width=1),
+                   _line(_slice(roll, p), f"{window}d average")],
+        title=f"Cross-sectional R²: {name}", ylabel="R² (%)", default=default,
+        subtitle=lambda p: f"Mean daily R²: {_slice(s, p).mean():.2f}%",
+    )
+
+def plot_exposure_corr(z_a, z_b, name_a="Momentum", name_b="Volatility", default="1y", window=21):
+    """Daily cross-sectional correlation between two factor exposures, with a rolling mean."""
+    rho = z_a.corrwith(z_b, axis=1).dropna()
+    roll = rho.rolling(window).mean()
+
+    return _period_figure(
+        lambda p: [_line(_slice(rho, p), "Daily correlation", color="lightgray", width=1),
+                   _line(_slice(roll, p), f"{window}d average")],
+        title=f"Cross-sectional exposure correlation: {name_a} vs {name_b}",
+        ylabel="Correlation", default=default, hline=0,
+        subtitle=lambda p: f"Mean correlation: {_slice(rho, p).mean():.2f}",
+        caption="Correlation across all stocks, each day, between the two standardized exposures. "
+                "Far from zero means the isolated factor returns contaminate each other.",
+    )
+
+def plot_factor_compare(series, title="Factor returns", default="1y", caption=None):
+    """Cumulative returns of several factor series on common dates, Sharpe of each in the subtitle."""
+    styles = [dict(color="black"), dict(color="gray", dash="dash"),
+              dict(color="#4a6fa5"), dict(color="#b5651d", dash="dot")]
+    df = pd.concat(series, axis=1, join="inner").dropna() * 100
+
+    def window(p):
+        return df[df.index >= df.index.max() - PERIODS[p]]
+
+    def subtitle(p):
+        w = window(p)
+        sr = w.mean() / w.std() * np.sqrt(252)
+        return "   ".join(f"{c}: Sharpe {sr[c]:.2f}" for c in w)
+
+    fig = _period_figure(
+        lambda p: [_line(window(p)[c].cumsum(), c, **styles[i % len(styles)])
+                   for i, c in enumerate(df)],
+        title=title, ylabel="Cumulative return (%)", default=default,
+        hline=0, subtitle=subtitle, caption=caption,
+    )
+    fig.update_layout(margin_t=120)
+    return fig
