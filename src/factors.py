@@ -174,3 +174,39 @@ def risk_decomp(contrib, total="Total"):
     })
     out.loc[total] = [r.std() * np.sqrt(252) * 100, 1.0, 100.0]
     return out
+
+def cs_regression_market(returns, styles, sectors, min_obs=50, return_resid=False):
+    """Daily cross-sectional OLS with an explicit market factor:
+    r_it = f_mkt + sum_s D_is f_s + sum_k x_ik f_k + e_it,
+    subject to sum_s w_s f_s = 0 (w_s = sector's share of stocks that day)."""
+    snames, knames = list(sectors), list(styles)
+    S, R = len(snames), returns.values
+    lag = lambda p: p.shift(1).reindex(index=returns.index, columns=returns.columns).values
+    D = np.stack([lag(sectors[s]) for s in snames], axis=-1)
+    X = np.stack([lag(styles[k]) for k in knames], axis=-1)
+    E = np.full_like(R, np.nan)
+
+    rows = []
+    for t in range(len(R)):
+        ok = ~np.isnan(R[t]) & ~np.isnan(D[t]).any(axis=1) & ~np.isnan(X[t]).any(axis=1)
+        n = ok.sum()
+        if n < min_obs:
+            rows.append([np.nan] * (1 + S + len(knames) + 2))
+            continue
+        y, d, x = R[t][ok], D[t][ok], X[t][ok]
+
+        w = d.sum(axis=0) / n                                  # sector weights
+        C = np.vstack([np.eye(S - 1), -w[:-1] / w[-1]])        # maps 10 free sectors -> all 11
+        A = np.column_stack([np.ones(n), d @ C, x])
+        coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+        e = y - A @ coef
+        E[t, ok] = e
+
+        rows.append([coef[0], *(C @ coef[1:S]), *coef[S:], 1 - e.var() / y.var(), n])
+
+    out = pd.DataFrame(rows, index=returns.index, columns=["Market", *snames, *knames, "r2", "n"])
+    keep = out["r2"].notna()
+    out = out[keep]
+    if return_resid:
+        return out, pd.DataFrame(E, index=returns.index, columns=returns.columns)[keep]
+    return out
