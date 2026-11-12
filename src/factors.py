@@ -98,3 +98,29 @@ def cs_regression_multi(returns, exposures, min_obs=50):
 
     out = pd.DataFrame(rows, index=returns.index, columns=["intercept", *names, "r2", "n"])
     return out.dropna(subset=["r2"])
+
+def reversal(prices, window=21):
+    """Short-term reversal: negative of the trailing 1-month return (long losers, short winners)."""
+    return -(prices / prices.shift(window) - 1)
+
+def beta_exposure(returns, mkt_ret, window=252):
+    """Rolling beta of each stock to the market: Cov(r_i, r_m) / Var(r_m) over the trailing window."""
+    m = mkt_ret.reindex(returns.index)
+    mp = int(0.8 * window)
+    roll = lambda x: x.rolling(window, min_periods=mp).mean()
+
+    cov = roll(returns.mul(m, axis=0)) - roll(returns).mul(roll(m), axis=0)
+    var = roll(m**2) - roll(m)**2
+    return cov.div(var, axis=0)
+
+def factor_stats(fr):
+    """Summary stats for a DataFrame of daily factor returns (decimals), one column per series."""
+    fr = fr.dropna() * 100
+    return pd.DataFrame({
+        "Ann. return (%)": fr.mean() * 252,
+        "Ann. vol (%)": fr.std() * np.sqrt(252),
+        "Sharpe": fr.mean() / fr.std() * np.sqrt(252),
+        "t-stat": fr.mean() / fr.std() * np.sqrt(len(fr)),
+        "Max drawdown (%)": (fr.cumsum() - fr.cumsum().cummax()).min(),
+        "Days": len(fr),
+    })

@@ -349,5 +349,62 @@ def plot_factor_compare(series, title="Factor returns", default="1y", caption=No
         title=title, ylabel="Cumulative return (%)", default=default,
         hline=0, subtitle=subtitle, caption=caption,
     )
-    fig.update_layout(margin_t=120)
+    fig.update_layout(margin_t=120, legend_y=1.0)
+    return fig
+
+def plot_table(data, title=None, subtitle=None, caption=None, fmt="{:.2f}",
+               index=True, index_name="", width=None, zebra=False):
+    """Clean Times New Roman table from a DataFrame or Series.
+
+    fmt: format string ("{:.2f}"), callable, or dict {column: format} for per-column control.
+    """
+    df = data.to_frame(name=data.name or "Value") if isinstance(data, pd.Series) else data.copy()
+
+    def fmt_col(col):
+        f = fmt.get(col, "{:.2f}") if isinstance(fmt, dict) else fmt
+        apply = f if callable(f) else f.format
+        return [("" if pd.isna(v) else apply(v)) if isinstance(v, (int, float, np.number))
+                else str(v) for v in df[col]]
+
+    header = ([f"<b>{index_name}</b>"] if index else []) + [f"<b>{c}</b>" for c in df.columns]
+    cells = ([[str(i) for i in df.index]] if index else []) + [fmt_col(c) for c in df.columns]
+    align = (["left"] if index else []) + ["right"] * len(df.columns)
+
+    # column widths in px, sized to the longest text in each column (incl. header)
+    char_px = 7.5
+    col_px = [max(len(str(x)) for x in [h.replace("<b>", "").replace("</b>", "")] + col) * char_px + 30
+              for h, col in zip(header, cells)]
+
+    n_rows = len(df)
+    fill = (["white", "rgba(0,0,0,0.03)"] * n_rows)[:n_rows] if zebra else ["white"] * n_rows
+
+    fig = go.Figure(go.Table(
+        columnwidth=col_px,
+        header=dict(values=header, align=align, fill_color="white",
+                    line=dict(color="rgba(0,0,0,0.6)", width=1),
+                    font=dict(family="Times New Roman", size=14, color="black"), height=32),
+        cells=dict(values=cells, align=align, fill_color=[fill],
+                   line=dict(color="rgba(0,0,0,0.08)", width=1),
+                   font=dict(family="Times New Roman", size=13, color="black"), height=28),
+    ))
+
+    t = ""
+    if title:
+        t = title
+        if subtitle:
+            t += f"<br><span style='font-size:12px;color:gray'>{subtitle}</span>"
+
+    top = 90 if subtitle else (60 if title else 20)
+    bottom = 50 if caption else 20
+    fig.update_layout(
+        template="simple_white", font=FONT,
+        title=dict(text=t, x=0.5) if t else None,
+        width=width or max(int(sum(col_px)) + 40, 500),
+        height=top + bottom + 32 + 28 * n_rows + 30,
+        margin=dict(t=top, b=bottom, l=20, r=20),
+    )
+    if caption:
+        fig.add_annotation(text=caption, xref="paper", yref="paper", x=0.5, y=0, yshift=-10,
+                           xanchor="center", yanchor="top", showarrow=False,
+                           font=dict(family="Times New Roman", size=11, color="gray"))
     return fig
