@@ -10,7 +10,24 @@ import time
 
 import numpy as np
 
-data_dir = Path(__file__).resolve().parents[1] / "data"
+import io
+import zipfile
+
+root_dir = Path(__file__).resolve().parents[1] / "data"
+data_dir = root_dir                                         # sp500 by default
+fund_dir = data_dir / "fundamentals"
+facts_dir = root_dir / "fundamentals" / "companyfacts"      # EDGAR cache, shared by all universes
+
+sec_headers = {"User-Agent": "Paul Grajzl paulgrajzl@gmail.com"}
+
+
+def set_universe(name):
+    """Point every load/save at a universe folder: 'sp500' (default) or e.g. 'r3000'."""
+    global data_dir, fund_dir
+    data_dir = root_dir if name == "sp500" else root_dir / name
+    fund_dir = data_dir / "fundamentals"
+    for sub in ["prices", "returns", "fundamentals"]:
+        (data_dir / sub).mkdir(parents=True, exist_ok=True)
 
 
 def get_sp500_constituents(save=True):
@@ -90,9 +107,6 @@ def get_volume(tickers, years=5, save=True):
 def load_volume():
     return pd.read_parquet(data_dir / "prices" / "volume.parquet")
 
-sec_headers = {"User-Agent": "Paul Grajzl paulgrajzl@gmail.com"}
-fund_dir = data_dir / "fundamentals"
-
 
 def get_cik_map(save=True):
     """Ticker -> CIK (SEC company ID, zero-padded to 10 digits)."""
@@ -110,7 +124,7 @@ def get_cik_map(save=True):
 
 def get_company_facts(cik, refresh=False):
     """Full XBRL history for one company. Cached locally after the first download."""
-    path = fund_dir / "companyfacts" / f"CIK{cik}.json"
+    path = facts_dir / f"CIK{cik}.json"
     if path.exists() and not refresh:
         return json.loads(path.read_text())
 
@@ -210,3 +224,74 @@ def build_fundamentals(tickers, items, index, max_age_days=400, save=True):
 
 def load_fundamental(name):
     return pd.read_parquet(fund_dir / f"{name}.parquet")
+
+def get_ff_factors(save=True):
+    """Daily Fama-French 3 factors + momentum from Ken French's Data Library (decimals)."""
+    base = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+    files = ["F-F_Research_Data_Factors_daily_CSV.zip", "F-F_Momentum_Factor_daily_CSV.zip"]
+
+    frames = []
+    for f in files:
+        z = zipfile.ZipFile(io.BytesIO(requests.get(base + f, headers={"User-Agent": "Mozilla/5.0"}).content))
+        rows = [line.split(",") for line in z.read(z.namelist()[0]).decode("latin-1").splitlines()]
+        is_date = lambda r: r[0].strip().isdigit() and len(r[0].strip()) == 8
+        start = next(i for i, r in enumerate(rows) if is_date(r))
+        header = [c.strip() for c in rows[start - 1]][1:]
+        body = []
+        for r in rows[start:]:
+            if not is_date(r):
+                break
+            body.append([c.strip() for c in r])
+        df = pd.DataFrame(body, columns=["date", *header])
+        df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
+        frames.append(df.set_index("date").astype(float) / 100)
+
+    ff = pd.concat(frames, axis=1).dropna()
+    if save:
+        ff.to_parquet(data_dir / "ff_factors.parquet")
+    return ff
+
+def get_russell3000(path=None, save=True):
+    """Russell 3000 constituents (tickers + GICS sectors) from a downloaded iShares IWV holdings CSV."""
+    path = path or data_dir / "IWV_holdings.csv"
+    lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip().strip('"').startswith("Ticker"))
+    df = pd.read_csv(StringIO("\n".join(lines[start:])), on_bad_lines="skip")
+
+    df = df[df["Asset Class"] == "Equity"][["Ticker", "Name", "Sector"]]
+    df.columns = ["ticker", "name", "sector"]
+
+    df["ticker"] = df["ticker"].astype(str).str.strip().str.replace(r"[ .]", "-", regex=True)   # BRK B -> BRK-B
+    df = df[df["ticker"].str.fullmatch(r"[A-Z]+(-[A-Z])?") & (df["sector"] != "Other")]           # drop junk rows
+
+    # iShares sometimes writes class shares without a separator (BRKB); match to SEC style (BRK-B)
+    sec = set(get_cik_map(save=False)["ticker"])
+    fix = lambda t: t if t in sec or len(t) < 2 or (t[:-1] + "-" + t[-1]) not in sec else t[:-1] + "-" + t[-1]
+    df["ticker"] = df["ticker"].map(fix)
+    df = df[df["ticker"].isin(sec)].drop_duplicates("ticker").reset_index(drop=True)
+
+    if save:
+        df.to_csv(data_dir / "constituents.csv", index=False)
+    return df
+
+def get_prices_volume(tickers, years=5, chunk=200, save=True):
+    """Daily adjusted close and volume, downloaded in batches. Returns prices, volume, failed tickers."""
+    start = pd.Timestamp.today() - pd.DateOffset(years=years)
+    px, vol = [], []
+
+    for i in range(0, len(tickers), chunk):
+        batch = tickers[i:i + chunk]
+        d = yf.download(batch, start=start, auto_adjust=True, progress=False, threads=True)
+        px.append(d["Close"])
+        vol.append(d["Volume"])
+        print(f"{min(i + chunk, len(tickers))}/{len(tickers)}")
+        time.sleep(1)
+
+    prices = pd.concat(px, axis=1).dropna(axis=1, how="all").dropna(axis=0, how="all")
+    volume = pd.concat(vol, axis=1).reindex_like(prices)
+    failed = sorted(set(tickers) - set(prices.columns))
+
+    if save:
+        prices.to_parquet(data_dir / "prices" / "prices.parquet")
+        volume.to_parquet(data_dir / "prices" / "volume.parquet")
+    return prices, volume, failed
