@@ -47,6 +47,7 @@ def momentum(prices, lookback=252, skip=21):
 
 def standardize(X, clip=3.0):
     """Cross-sectional z-score each day, clip outliers, then re-standardize."""
+    X = X.replace([np.inf, -np.inf], np.nan)
     z = X.sub(X.mean(axis=1), axis=0).div(X.std(axis=1), axis=0).clip(-clip, clip)
     return z.sub(z.mean(axis=1), axis=0).div(z.std(axis=1), axis=0)
 
@@ -210,3 +211,19 @@ def cs_regression_market(returns, styles, sectors, min_obs=50, return_resid=Fals
     if return_resid:
         return out, pd.DataFrame(E, index=returns.index, columns=returns.columns)[keep]
     return out
+
+def value(book, prices, shares):
+    """Log book-to-price: log(book equity / market cap). Negative or zero book equity excluded."""
+    mcap = prices * shares.reindex_like(prices)
+    bp = book.reindex_like(prices) / mcap
+    return np.log(bp.where(bp > 0))
+
+def size(prices, shares):
+    """Log market cap: price x point-in-time shares outstanding."""
+    mcap = prices * shares.reindex_like(prices)
+    return np.log(mcap.where(mcap > 0))
+
+def turnover(volume, shares, window=63):
+    """Log average daily turnover: shares traded / shares outstanding."""
+    daily = (volume / shares.reindex_like(volume)).replace(0, np.nan)
+    return np.log(daily.rolling(window, min_periods=int(0.8 * window)).mean())
