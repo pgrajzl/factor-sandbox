@@ -192,9 +192,12 @@ def build_fundamentals(tickers, items, index, max_age_days=400, save=True):
     raw = {name: {} for name in items}
 
     for i, t in enumerate(tickers, 1):
-        facts = get_company_facts(cik[t])
+        try:
+            facts = get_company_facts(cik[t])
+        except Exception:
+            facts = None                        # no XBRL data at the SEC (404) or unknown ticker
         for name, spec in items.items():
-            raw[name][t] = pit_instant(facts, **spec)
+            raw[name][t] = pit_instant(facts, **spec) if facts else pd.Series(dtype=float)
         if i % 100 == 0:
             print(f"{i}/{len(tickers)}")
 
