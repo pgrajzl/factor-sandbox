@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 from . import factors
 from plotly.subplots import make_subplots
 
+import textwrap
+
 PERIODS = {
     "5y": pd.DateOffset(years=5),
     "3y": pd.DateOffset(years=3),
@@ -357,6 +359,7 @@ def plot_table(data, title=None, subtitle=None, caption=None, fmt="{:.2f}",
     """Clean Times New Roman table from a DataFrame or Series.
 
     fmt: format string ("{:.2f}"), callable, or dict {column: format} for per-column control.
+    Long captions wrap automatically to the table width.
     """
     df = data.to_frame(name=data.name or "Value") if isinstance(data, pd.Series) else data.copy()
 
@@ -374,6 +377,7 @@ def plot_table(data, title=None, subtitle=None, caption=None, fmt="{:.2f}",
     char_px = 7.5
     col_px = [max(len(str(x)) for x in [h.replace("<b>", "").replace("</b>", "")] + col) * char_px + 30
               for h, col in zip(header, cells)]
+    fig_width = width or max(int(sum(col_px)) + 40, 500)
 
     n_rows = len(df)
     fill = (["white", "rgba(0,0,0,0.03)"] * n_rows)[:n_rows] if zebra else ["white"] * n_rows
@@ -394,19 +398,22 @@ def plot_table(data, title=None, subtitle=None, caption=None, fmt="{:.2f}",
         if subtitle:
             t += f"<br><span style='font-size:12px;color:gray'>{subtitle}</span>"
 
+    # wrap the caption to roughly the figure width (11px Times ~ 5.5px per character)
+    cap_lines = textwrap.wrap(caption, width=max(40, int((fig_width - 40) / 5.5))) if caption else []
+
     top = 90 if subtitle else (60 if title else 20)
-    bottom = 50 if caption else 20
+    bottom = 20 + 16 * len(cap_lines) + (10 if cap_lines else 0)
     fig.update_layout(
         template="simple_white", font=FONT,
         title=dict(text=t, x=0.5) if t else None,
-        width=width or max(int(sum(col_px)) + 40, 500),
+        width=fig_width,
         height=top + bottom + 32 + 28 * n_rows + 30,
         margin=dict(t=top, b=bottom, l=20, r=20),
     )
-    if caption:
-        fig.add_annotation(text=caption, xref="paper", yref="paper", x=0.5, y=0, yshift=-10,
-                           xanchor="center", yanchor="top", showarrow=False,
-                           font=dict(family="Times New Roman", size=11, color="gray"))
+    if cap_lines:
+        fig.add_annotation(text="<br>".join(cap_lines), xref="paper", yref="paper",
+                           x=0.5, y=0, yshift=-10, xanchor="center", yanchor="top", showarrow=False,
+                           align="center", font=dict(family="Times New Roman", size=11, color="gray"))
     return fig
 
 def plot_attribution(contrib, ticker, default="1y"):
